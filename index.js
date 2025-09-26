@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -33,27 +34,33 @@ async function run() {
         const parcelCollection = client.db('parcelDB').collection('parcels')
 
         // pacels api
-        app.get('/parcels/:email', async(req,res)=>{
-            try{
+        app.get('/parcels/:email', async (req, res) => {
+            try {
                 const email = req.params.email;
-                const query = {created_by : email}
+                const query = { created_by: email }
                 const result = await parcelCollection.find(query).toArray()
                 res.send(result)
-            }catch(error){
+            } catch (error) {
                 console.log('Failed to fetch parcels');
-                res.status(500).send({message: 'Failed to fetch parcels'})
+                res.status(500).send({ message: 'Failed to fetch parcels' })
             }
         })
-        // delete parcels
-        app.delete('/parcels/:id', async(req,res)=>{
-            try{
-                const id = req.params.id
-            const query = { _id : new ObjectId(id)}
-            const result = await parcelCollection.deleteOne(query)
+        // parcel detail by id 
+        app.get('/parcels/payment/:id', async (req, res) => {
+            const id = req.params.id
+            const result = await parcelCollection.findOne({ _id: new ObjectId(id) })
             res.send(result)
-            }catch(error){
+        })
+        // delete parcels
+        app.delete('/parcels/:id', async (req, res) => {
+            try {
+                const id = req.params.id
+                const query = { _id: new ObjectId(id) }
+                const result = await parcelCollection.deleteOne(query)
+                res.send(result)
+            } catch (error) {
                 console.log(error);
-                res.status(500).send({message: 'Failed to delete parcel'})
+                res.status(500).send({ message: 'Failed to delete parcel' })
             }
         })
 
@@ -62,6 +69,20 @@ async function run() {
             const result = await parcelCollection.insertOne(parcel);
             res.send(result);
         });
+        // payment intent 
+        app.post('/create-payment-intent', async (req, res) => {
+            try{
+                const {amount} = req.body
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: amount,
+                    currency: 'usd',
+                    payment_method_types : ['card'],
+                })
+                res.send({clientSecret : paymentIntent.client_secret})
+            }catch(err){
+                res.status(500).send({error: error.message})
+            }
+        })
 
 
         await client.db("admin").command({ ping: 1 });
@@ -75,7 +96,7 @@ run().catch(console.dir);
 
 
 app.get('/', (req, res) => {
-    
+
     res.send(console.log('Parcel server is running'))
 })
 app.listen(port, () => {
