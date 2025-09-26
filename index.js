@@ -32,6 +32,7 @@ async function run() {
         await client.connect();
 
         const parcelCollection = client.db('parcelDB').collection('parcels')
+        const paymentCollection = client.db('parcelDB').collection('payments')
 
         // pacels api
         app.get('/parcels/:email', async (req, res) => {
@@ -82,6 +83,24 @@ async function run() {
             }catch(err){
                 res.status(500).send({error: error.message})
             }
+        })
+        // payments
+        app.post('/payments', async(req,res)=>{
+            const payment = req.body;
+            // update parcel documnet
+            await parcelCollection.updateOne({_id: new ObjectId(payment.parcelId)}, {
+                $set : { payment_status : 'paid'}
+            })
+            // save data to payment 
+            const result = await paymentCollection.insertOne(payment)
+            res.send(result)
+        })
+        // payment hidtory
+        app.get('/payments/:email', async(req,res)=>{
+            const email = req.params.email
+            console.log(email);
+            const result = await paymentCollection.find({email : email}).toArray()
+            res.send(result)
         })
 
 
