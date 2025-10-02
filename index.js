@@ -15,8 +15,8 @@ app.use(cors());
 app.use(express.json());
 
 
-
-const serviceAccount = require("./firebse-admin-key.json");
+const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8');
+const serviceAccount = JSON.parse(decodedKey);
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
@@ -40,7 +40,7 @@ const client = new MongoClient(uri, {
 async function run() {
     try {
 
-        await client.connect();
+        // await client.connect();
 
         const parcelCollection = client.db('parcelDB').collection('parcels')
         const paymentCollection = client.db('parcelDB').collection('payments')
@@ -68,6 +68,15 @@ async function run() {
             }
         };
 
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded.email;
+            const query = { email }
+            const user = await usersCollection.findOne(query);
+            if (!user || user.role !== 'admin') {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+            next();
+        }
 
         app.post('/users', async (req, res) => {
             const user = req.body
@@ -80,6 +89,68 @@ async function run() {
             const result = await usersCollection.insertOne(user)
             res.send(result)
         })
+        // GET: Get user role by email
+        app.get('/users/:email/role', async (req, res) => {
+            try {
+                const email = req.params.email;
+
+                if (!email) {
+                    return res.status(400).send({ message: 'Email is required' });
+                }
+
+                const user = await usersCollection.findOne({ email });
+
+                if (!user) {
+                    return res.status(404).send({ message: 'User not found' });
+                }
+
+                res.send({ role: user.role || 'user' });
+            } catch (error) {
+                console.error('Error getting user role:', error);
+                res.status(500).send({ message: 'Failed to get role' });
+            }
+        });
+
+        app.get("/users/search", async (req, res) => {
+            const emailQuery = req.query.email;
+            if (!emailQuery) {
+                return res.status(400).send({ message: "Missing email query" });
+            }
+
+            const regex = new RegExp(emailQuery, "i"); // case-insensitive partial match
+
+            try {
+                const users = await usersCollection
+                    .find({ email: { $regex: regex } })
+                    // .project({ email: 1, createdAt: 1, role: 1 })
+                    .limit(10)
+                    .toArray();
+                res.send(users);
+            } catch (error) {
+                console.error("Error searching users", error);
+                res.status(500).send({ message: "Error searching users" });
+            }
+        });
+
+        app.patch("/users/:id/role", async (req, res) => {
+            const { id } = req.params;
+            const { role } = req.body;
+
+            if (!["admin", "user"].includes(role)) {
+                return res.status(400).send({ message: "Invalid role" });
+            }
+
+            try {
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { role } }
+                );
+                res.send({ message: `User role updated to ${role}`, result });
+            } catch (error) {
+                console.error("Error updating user role", error);
+                res.status(500).send({ message: "Failed to update user role" });
+            }
+        });
 
         // pacels api
         app.get('/parcels/:email', verifyToken, async (req, res) => {
@@ -93,6 +164,71 @@ async function run() {
                 res.status(500).send({ message: 'Failed to fetch parcels' })
             }
         })
+        // GET: All parcels OR parcels by user (created_by), sorted by latest
+        app.get('/parcels', async (req, res) => {
+            try {
+                const { email, payment_status, delivery_status } = req.query;
+                let query = {}
+                if (email) {
+                    query = { created_by: email }
+                }
+
+                if (payment_status) {
+                    query.payment_status = payment_status
+                }
+
+                if (delivery_status) {
+                    query.delivery_status = delivery_status
+                }
+
+                const options = {
+                    sort: { createdAt: -1 }, // Newest first
+                };
+
+                console.log('parcel query', req.query, query)
+
+                const parcels = await parcelCollection.find(query, options).toArray();
+                res.send(parcels);
+            } catch (error) {
+                console.error('Error fetching parcels:', error);
+                res.status(500).send({ message: 'Failed to get parcels' });
+            }
+        });
+
+        app.patch("/parcels/:id/assign", async (req, res) => {
+            const parcelId = req.params.id;
+            const { riderId, riderName } = req.body;
+
+            try {
+                // Update parcel
+                await parcelCollection.updateOne(
+                    { _id: new ObjectId(parcelId) },
+                    {
+                        $set: {
+                            delivery_status: "in_transit",
+                            assigned_rider_id: riderId,
+                            assigned_rider_name: riderName,
+                        },
+                    }
+                );
+
+                // Update rider
+                await riderCollection.updateOne(
+                    { _id: new ObjectId(riderId) },
+                    {
+                        $set: {
+                            work_status: "in_delivery",
+                        },
+                    }
+                );
+
+                res.send({ message: "Rider assigned" });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to assign rider" });
+            }
+        });
+
         // parcel detail by id 
         app.get('/parcels/payment/:id', async (req, res) => {
             const id = req.params.id
@@ -143,7 +279,7 @@ async function run() {
             res.send(result)
         })
         // payment hidtory
-        app.get('/payments/:email', verifyToken, async (req, res) => {
+        app.get('/payments/:email',verifyToken, async (req, res) => {
             const email = req.params.email
             console.log('decoded', req.decoded);
             if (req.decoded.email !== email) {
@@ -157,39 +293,72 @@ async function run() {
             res.send(result)
         })
 
+
         // rider api
-        app.post('/riders', async(req,res)=>{
+        app.post('/riders', async (req, res) => {
             const riderData = req.body
             const result = await riderCollection.insertOne(riderData)
             res.send(result)
         })
         // pending riders
-        app.get('/riders/pending', async(req,res)=>{
-            const pendingRiders = await riderCollection.find({status : "pending"}).toArray()
+        app.get('/riders/pending', async (req, res) => {
+            const pendingRiders = await riderCollection.find({ status: "pending" }).toArray()
             res.send(pendingRiders)
         })
-        app.get('/riders/approved', async(req,res)=>{
-            const pendingRiders = await riderCollection.find({status : "approved"}).toArray()
+
+        app.get("/riders/available", async (req, res) => {
+            const { district } = req.query;
+
+            try {
+                const riders = await riderCollection
+                    .find({
+                        district,
+                        // status: { $in: ["approved", "active"] },
+                        // work_status: "available",
+                    })
+                    .toArray();
+
+                res.send(riders);
+            } catch (err) {
+                res.status(500).send({ message: "Failed to load riders" });
+            }
+        });
+
+        app.get('/riders/approved', async (req, res) => {
+            const pendingRiders = await riderCollection.find({ status: "approved" }).toArray()
             res.send(pendingRiders)
         })
-        // approce reject
-        app.patch('/riders/:id', async(req,res)=>{
+        // approve and reject
+        app.patch('/riders/:id', async (req, res) => {
             const id = req.params.id
-            const {status} = req.body
+            const { status, email } = req.body
             console.log(status, 'in patch');
-            const query = {_id : new ObjectId(id)}
-            const updatedDoc = {
+            const query = { _id: new ObjectId(id) }
+            const updatedRIderStatus = {
                 $set: {
                     status
                 }
             }
-            const result = await riderCollection.updateOne(query,updatedDoc)
+            // update user collection user role to rider
+            if (status === 'approved') {
+                const roleQuery = { email: email }
+                console.log(email);
+                const updatedRole = {
+                    $set: {
+                        role: 'rider'
+                    }
+                }
+                const roleResult = await usersCollection.updateOne(roleQuery, updatedRole)
+                console.log(roleResult)
+            }
+
+            const result = await riderCollection.updateOne(query, updatedRIderStatus)
             res.send(result)
         })
 
 
-        await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // Ensures that the client will close when you finish/error
         // await client.close();
