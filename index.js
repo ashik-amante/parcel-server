@@ -46,6 +46,7 @@ async function run() {
         const paymentCollection = client.db('parcelDB').collection('payments')
         const usersCollection = client.db('parcelDB').collection('users')
         const riderCollection = client.db('parcelDB').collection('riders')
+        const trackingsCollection = client.db('parcelDB').collection('trackings')
 
         // middle wire custom
         const verifyToken = async (req, res, next) => {
@@ -73,6 +74,16 @@ async function run() {
             const query = { email }
             const user = await usersCollection.findOne(query);
             if (!user || user.role !== 'admin') {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+            next();
+        }
+        // rider verification
+        const verifyRider = async (req, res, next) => {
+            const email = req.decoded.email;
+            const query = { email }
+            const user = await usersCollection.findOne(query);
+            if (!user || user.role !== 'rider') {
                 return res.status(403).send({ message: 'forbidden access' })
             }
             next();
@@ -197,7 +208,7 @@ async function run() {
 
         app.patch("/parcels/:id/assign", async (req, res) => {
             const parcelId = req.params.id;
-            const { riderId, riderName } = req.body;
+            const { riderId, riderName, riderEmail } = req.body;
 
             try {
                 // Update parcel
@@ -205,9 +216,10 @@ async function run() {
                     { _id: new ObjectId(parcelId) },
                     {
                         $set: {
-                            delivery_status: "in_transit",
+                            delivery_status: "rider_assigned",
                             assigned_rider_id: riderId,
                             assigned_rider_name: riderName,
+                            assigned_rider_email: riderEmail,
                         },
                     }
                 );
@@ -228,6 +240,32 @@ async function run() {
                 res.status(500).send({ message: "Failed to assign rider" });
             }
         });
+        // update parcel status
+        app.patch('/parcels/:id/status', async (req, res) => {
+            const parcelId = req.params.id
+            const { status } = req.body;
+            console.log(parcelId, status, 'backend check');
+            const updatedDoc = {
+                delivery_status: status
+            }
+            if (
+                status === 'in_transit') {
+                updatedDoc.picked_At = new Date().toISOString()
+            }
+            if (status === 'delivered') {
+                updatedDoc.delivered_at = new Date().toISOString()
+            }
+
+            try {
+                const result = await parcelCollection.updateOne(
+                    { _id: new ObjectId(parcelId) },
+                    { $set: updatedDoc }
+                )
+                res.send(result)
+            } catch (error) {
+                console.log(error);
+            }
+        })
 
         // parcel detail by id 
         app.get('/parcels/payment/:id', async (req, res) => {
@@ -248,121 +286,239 @@ async function run() {
             }
         })
 
-        app.post('/parcels', async (req, res) => {
-            const parcel = req.body;
-            const result = await parcelCollection.insertOne(parcel);
-            res.send(result);
-        });
-        // payment intent 
-        app.post('/create-payment-intent', async (req, res) => {
-            try {
-                const { amount } = req.body
-                const paymentIntent = await stripe.paymentIntents.create({
-                    amount: amount,
-                    currency: 'usd',
-                    payment_method_types: ['card'],
-                })
-                res.send({ clientSecret: paymentIntent.client_secret })
-            } catch (err) {
-                res.status(500).send({ error: error.message })
-            }
-        })
-        // payments
-        app.post('/payments', async (req, res) => {
-            const payment = req.body;
-            // update parcel documnet
-            await parcelCollection.updateOne({ _id: new ObjectId(payment.parcelId) }, {
-                $set: { payment_status: 'paid' }
-            })
-            // save data to payment 
-            const result = await paymentCollection.insertOne(payment)
-            res.send(result)
-        })
-        // payment hidtory
-        app.get('/payments/:email',verifyToken, async (req, res) => {
-            const email = req.params.email
-            console.log('decoded', req.decoded);
-            if (req.decoded.email !== email) {
-                return res.status(403).send({ message: "forbidden access" })
-            }
-            console.log(email);
-            const result = await paymentCollection
-                .find({ email: email })
-                .sort({ paidAt: -1 })
-                .toArray()
-            res.send(result)
-        })
-
-
-        // rider api
-        app.post('/riders', async (req, res) => {
-            const riderData = req.body
-            const result = await riderCollection.insertOne(riderData)
-            res.send(result)
-        })
-        // pending riders
-        app.get('/riders/pending', async (req, res) => {
-            const pendingRiders = await riderCollection.find({ status: "pending" }).toArray()
-            res.send(pendingRiders)
-        })
-
-        app.get("/riders/available", async (req, res) => {
-            const { district } = req.query;
-
-            try {
-                const riders = await riderCollection
-                    .find({
-                        district,
-                        // status: { $in: ["approved", "active"] },
-                        // work_status: "available",
-                    })
-                    .toArray();
-
-                res.send(riders);
-            } catch (err) {
-                res.status(500).send({ message: "Failed to load riders" });
-            }
-        });
-
-        app.get('/riders/approved', async (req, res) => {
-            const pendingRiders = await riderCollection.find({ status: "approved" }).toArray()
-            res.send(pendingRiders)
-        })
-        // approve and reject
-        app.patch('/riders/:id', async (req, res) => {
-            const id = req.params.id
-            const { status, email } = req.body
-            console.log(status, 'in patch');
-            const query = { _id: new ObjectId(id) }
-            const updatedRIderStatus = {
-                $set: {
-                    status
-                }
-            }
-            // update user collection user role to rider
-            if (status === 'approved') {
-                const roleQuery = { email: email }
-                console.log(email);
-                const updatedRole = {
+        // cash out 
+        app.patch("/parcels/:id/cashout", async (req, res) => {
+            const id = req.params.id;
+            const result = await parcelCollection.updateOne(
+                { _id: new ObjectId(id) },
+                {
                     $set: {
-                        role: 'rider'
+                        cashout_status: "cashed_out",
+                        cashed_out_at: new Date()
                     }
                 }
-                const roleResult = await usersCollection.updateOne(roleQuery, updatedRole)
-                console.log(roleResult)
-            }
+            );
+            res.send(result);
+        });
 
-            const result = await riderCollection.updateOne(query, updatedRIderStatus)
-            res.send(result)
+        // db aggregate for admin dashboard
+        app.get('/parcels/delivery/status-count', async (req, res) => {
+            const pipeline = [
+                {
+                    $group: {
+                        _id: '$delivery_status',
+                        count : { $sum: 1 }
+                    }
+                },
+                {
+                    $project : {
+                        status : '$_id',
+                        count : 1,
+                        _id : 0
+                    }
+                }
+            ]
+    const result = await parcelCollection.aggregate(pipeline).toArray()
+    res.send(result)
+})
+
+// GET: Load completed parcel deliveries for a rider
+app.get('/rider/completed-parcels', async (req, res) => {
+    try {
+        const email = req.query.email;
+
+        if (!email) {
+            return res.status(400).send({ message: 'Rider email is required' });
+        }
+
+        const query = {
+            assigned_rider_email: email,
+            delivery_status: {
+                $in: ['delivered', 'service_center_delivered']
+            },
+        };
+
+        const options = {
+            sort: { creation_date: -1 }, // Latest first
+        };
+
+        const completedParcels = await parcelCollection.find(query, options).toArray();
+
+        res.send(completedParcels);
+
+    } catch (error) {
+        console.error('Error loading completed parcels:', error);
+        res.status(500).send({ message: 'Failed to load completed deliveries' });
+    }
+});
+
+
+app.post('/parcels', async (req, res) => {
+    const parcel = req.body;
+    const result = await parcelCollection.insertOne(parcel);
+    res.send(result);
+});
+// payment intent 
+app.post('/create-payment-intent', async (req, res) => {
+    try {
+        const { amount } = req.body
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: amount,
+            currency: 'usd',
+            payment_method_types: ['card'],
         })
+        res.send({ clientSecret: paymentIntent.client_secret })
+    } catch (err) {
+        res.status(500).send({ error: error.message })
+    }
+})
+// payments
+app.post('/payments', async (req, res) => {
+    const payment = req.body;
+    // update parcel documnet
+    await parcelCollection.updateOne({ _id: new ObjectId(payment.parcelId) }, {
+        $set: { payment_status: 'paid' }
+    })
+    // save data to payment 
+    const result = await paymentCollection.insertOne(payment)
+    res.send(result)
+})
+// payment hidtory
+app.get('/payments/:email', verifyToken, async (req, res) => {
+    const email = req.params.email
+    console.log('decoded', req.decoded);
+    if (req.decoded.email !== email) {
+        return res.status(403).send({ message: "forbidden access" })
+    }
+    console.log(email);
+    const result = await paymentCollection
+        .find({ email: email })
+        .sort({ paidAt: -1 })
+        .toArray()
+    res.send(result)
+})
+
+app.post("/trackings", async (req, res) => {
+    const update = req.body;
+
+    update.timestamp = new Date(); //  correct timestamp
+    if (!update.tracking_id || !update.status) {
+        return res.status(400).json({ message: "tracking_id and status are required." });
+    }
+
+    const result = await trackingsCollection.insertOne(update);
+    res.status(201).json(result);
+});
+
+// /trackings
+app.get("/trackings/:trackingId", async (req, res) => {
+    const trackingId = req.params.trackingId;
+
+    const updates = await trackingsCollection
+        .find({ tracking_id: trackingId })
+        .sort({ timestamp: 1 }) // sort by time ascending
+        .toArray();
+
+    res.json(updates);
+});
+
+// rider api
+app.post('/riders', async (req, res) => {
+    const riderData = req.body
+    const result = await riderCollection.insertOne(riderData)
+    res.send(result)
+})
+// pending riders
+app.get('/riders/pending', async (req, res) => {
+    const pendingRiders = await riderCollection.find({ status: "pending" }).toArray()
+    res.send(pendingRiders)
+})
+
+app.get("/riders/available", async (req, res) => {
+    const { district } = req.query;
+
+    try {
+        const riders = await riderCollection
+            .find({
+                district,
+                // status: { $in: ["approved", "active"] },
+                // work_status: "available",
+            })
+            .toArray();
+
+        res.send(riders);
+    } catch (err) {
+        res.status(500).send({ message: "Failed to load riders" });
+    }
+});
+
+// GET: Get pending delivery tasks for a rider
+app.get('/rider/parcels', async (req, res) => {
+    try {
+        const email = req.query.email;
+        console.log(email);
+
+        if (!email) {
+            return res.status(400).send({ message: 'Rider email is required' });
+        }
+
+        const query = {
+            assigned_rider_email: email,
+            delivery_status: { $in: ['rider_assigned', 'in_transit'] },
+        };
+
+        const options = {
+            sort: { creation_date: -1 }, // Newest first
+        };
+
+        const parcels = await parcelCollection.find(query, options).toArray();
+        res.send(parcels);
+    } catch (error) {
+        console.error('Error fetching rider tasks:', error);
+        res.status(500).send({ message: 'Failed to get rider tasks' });
+    }
+});
+
+
+app.get('/riders/approved', async (req, res) => {
+    const pendingRiders = await riderCollection.find({ status: "approved" }).toArray()
+    res.send(pendingRiders)
+})
+// approve and reject
+app.patch('/riders/:id', async (req, res) => {
+    const id = req.params.id
+    const { status, email } = req.body
+    console.log(status, 'in patch');
+    const query = { _id: new ObjectId(id) }
+    const updatedRIderStatus = {
+        $set: {
+            status
+        }
+    }
+    // update user collection user role to rider
+    if (status === 'approved') {
+        const roleQuery = { email: email }
+        console.log(email);
+        const updatedRole = {
+            $set: {
+                role: 'rider'
+            }
+        }
+        const roleResult = await usersCollection.updateOne(roleQuery, updatedRole)
+        console.log(roleResult)
+    }
+
+    const result = await riderCollection.updateOne(query, updatedRIderStatus)
+    res.send(result)
+})
 
 
         // await client.db("admin").command({ ping: 1 });
         // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
-        // Ensures that the client will close when you finish/error
-        // await client.close();
-    }
+    // Ensures that the client will close when you finish/error
+    // await client.close();
+}
 }
 run().catch(console.dir);
 
